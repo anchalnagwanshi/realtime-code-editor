@@ -181,7 +181,12 @@ export default function CodeEditor({ user, projectName, setProjectName }) {
       }
       // Add tracks to the remote stream
       event.streams[0].getTracks().forEach(track => {
-        remoteStreams.current[remoteSocketId].addTrack(track);
+        const existing = remoteStreams.current[remoteSocketId]
+          .getTracks()
+          .some(existingTrack => existingTrack.id === track.id);
+        if (!existing) {
+          remoteStreams.current[remoteSocketId].addTrack(track);
+        }
       });
       setRemoteStreamIds(prev => {
         // Ensure unique IDs and trigger re-render
@@ -192,7 +197,7 @@ export default function CodeEditor({ user, projectName, setProjectName }) {
 
     pc.onconnectionstatechange = () => {
       console.log(`PC with ${remoteSocketId} connection state: ${pc.connectionState}`);
-      if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+      if (['disconnected', 'failed', 'closed'].includes(pc.connectionState)) {
         console.log(`Peer ${remoteSocketId} disconnected or failed. Removing stream.`);
         if (peerConnections.current[remoteSocketId]) {
           peerConnections.current[remoteSocketId].close();
@@ -202,19 +207,22 @@ export default function CodeEditor({ user, projectName, setProjectName }) {
           delete remoteStreams.current[remoteSocketId];
         }
         setRemoteStreamIds(prev => prev.filter(id => id !== remoteSocketId));
-        // If this was the only connected peer, end the call
         if (Object.keys(peerConnections.current).length === 0 && callStatus === 'connected') {
           endCall();
         }
       } else if (pc.connectionState === 'connected') {
-        setCallStatus('connected'); // If any peer is connected, set status to connected
+        setCallStatus('connected');
       }
     };
 
     return pc;
   }, [localStream, projectName, endCall, callStatus]);
 
-
+  <VideoTiles
+    localStream={localStream}
+    remoteStreamIds={remoteStreamIds}
+    remoteStreams={remoteStreams}
+  />;
   // --- Start Call (call all peers in the room) ---
   const startCall = async () => {
     if (callStatus !== 'idle') {
@@ -832,7 +840,7 @@ export default function CodeEditor({ user, projectName, setProjectName }) {
 
 
   // Inline VideoTiles component or render directly
-  const VideoTiles = ({ localStream, remoteStreamIds }) => {
+  const VideoTiles = ({ localStream, remoteStreamIds, remoteStreams}) => {
     return (
       <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'center', gap: '10px' }}>
         {/* Local Video */}
@@ -854,7 +862,10 @@ export default function CodeEditor({ user, projectName, setProjectName }) {
             autoPlay
             playsInline
             ref={el => {
-              if (el) el.srcObject = remoteStreams.current[socketId];
+              const stream = remoteStreams?.current?.[socketId];
+            if (el && stream) {
+              el.srcObject = stream;
+            }
             }}
             style={{ width: '240px', height: '180px', borderRadius: '8px', border: '2px solid #2ea44f' }}
           />
@@ -1072,7 +1083,7 @@ export default function CodeEditor({ user, projectName, setProjectName }) {
         {/* WebRTC Video Section - Using the VideoTiles component */}
         {callStatus !== 'idle' || isCalling || incomingCall ? (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', padding: '10px', backgroundColor: '#21262d', borderBottom: '1px solid #30363d', justifyContent: 'center', alignItems: 'center' }}>
-            <VideoTiles localStream={localStream} remoteStreamIds={remoteStreamIds} />
+            <VideoTiles localStream={localStream} remoteStreamIds={remoteStreamIds} remoteStreams={remoteStreams}/>
             {callStatus === 'calling' && !Object.keys(peerConnections.current).length && <p style={{ color: '#8b949e' }}>Calling...</p>}
             {callStatus === 'receiving' && incomingCall && (
               <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '5px' }}>
