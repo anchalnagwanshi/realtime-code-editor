@@ -1,3 +1,4 @@
+// client/src/CodeEditor.js
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { io } from 'socket.io-client';
 import Editor from '@monaco-editor/react';
@@ -5,50 +6,60 @@ import axios from 'axios';
 import { db, storage } from './firebase'; // Import storage
 import { collection, doc, setDoc, getDoc, getDocs, deleteDoc } from "firebase/firestore"; // Import deleteDoc
 import { ref, deleteObject, listAll, uploadBytes } from "firebase/storage"; // Import Storage functions like listAll, uploadBytes
+import CodeVisualizerModal from './CodeVisualizerModal'; // <-- 1. IMPORT THE NEW COMPONENT
 
 // Initialize Socket.IO client, connecting to your backend server
 const socket = io(process.env.REACT_APP_SOCKET_SERVER_URL || 'http://localhost:3001');
 
-// Define STUN servers for NAT traversal. These are public, free STUN servers.
-const iceServers = {
-  iceServers: [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-  ],
-};
-
-// Custom Confirmation Dialog Component
-const ConfirmationDialog = ({ message, onConfirm, onCancel }) => {
+// A generic Modal component
+// MODIFIED: Made wider and taller to accommodate the visualizer
+const ModalDialog = ({ title, message, onConfirm, onCancel, confirmText = "Confirm" }) => {
   return (
     <div style={{
       position: 'fixed', top: '0', left: '0', right: '0', bottom: '0',
       backgroundColor: 'rgba(0,0,0,0.7)', display: 'flex', justifyContent: 'center', alignItems: 'center',
       zIndex: 1000
     }}>
-      <div style={{ backgroundColor: '#282c34', padding: '20px', borderRadius: '8px', boxShadow: '0 4px 8px rgba(0,0,0,0.2)', maxWidth: '400px', textAlign: 'center' }}>
-        <p style={{ marginBottom: '20px', fontSize: '1.1em', color: '#c9d1d9' }}>{message}</p>
-        <div style={{ display: 'flex', justifyContent: 'center', gap: '15px' }}>
-          <button
-            onClick={onCancel}
-            style={{
-              padding: '10px 20px', backgroundColor: '#6c757d', color: 'white', border: 'none',
-              borderRadius: '5px', cursor: 'pointer', transition: 'background-color 0.2s ease'
-            }}
-            onMouseEnter={(e) => e.target.style.backgroundColor = '#5a6268'}
-            onMouseLeave={(e) => e.target.style.backgroundColor = '#6c757d'}
-          >
-            Cancel
-          </button>
+      <div style={{
+        backgroundColor: '#282c34', padding: '20px', borderRadius: '8px',
+        boxShadow: '0 4px 8px rgba(0,0,0,0.2)',
+        width: '90%', // Make modal wider
+        maxWidth: '1200px', // Max width for visualizer
+        display: 'flex',
+        flexDirection: 'column',
+        maxHeight: '90vh' // Set max height for the whole modal
+      }}>
+        <h3 style={{ marginTop: 0, color: '#58a6ff', borderBottom: '1px solid #30363d', paddingBottom: '10px', flexShrink: 0 }}>{title}</h3>
+        
+        {/* This div will contain the content and scroll if needed */}
+        <div style={{ overflowY: 'auto', flexGrow: 1, minHeight: '60vh' }}>
+          {message}
+        </div>
+
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '15px', marginTop: '20px', paddingTop: '15px', borderTop: '1px solid #30363d', flexShrink: 0 }}>
+          {onCancel && (
+            <button
+              onClick={onCancel}
+              style={{
+                padding: '10px 20px', backgroundColor: '#6c757d', color: 'white', border: 'none',
+                borderRadius: '5px', cursor: 'pointer', transition: 'background-color 0.2s ease'
+              }}
+              onMouseEnter={(e) => e.target.style.backgroundColor = '#5a6268'}
+              onMouseLeave={(e) => e.target.style.backgroundColor = '#6c757d'}
+            >
+              Cancel
+            </button>
+          )}
           <button
             onClick={onConfirm}
             style={{
-              padding: '10px 20px', backgroundColor: '#dc3545', color: 'white', border: 'none',
+              padding: '10px 20px', backgroundColor: onCancel ? '#dc3545' : '#0366d6', color: 'white', border: 'none',
               borderRadius: '5px', cursor: 'pointer', transition: 'background-color 0.2s ease'
             }}
-            onMouseEnter={(e) => e.target.style.backgroundColor = '#c82333'}
-            onMouseLeave={(e) => e.target.style.backgroundColor = '#dc3545'}
+            onMouseEnter={(e) => e.target.style.backgroundColor = onCancel ? '#c82333' : '#005cc5'}
+            onMouseLeave={(e) => e.target.style.backgroundColor = onCancel ? '#dc3545' : '#0366d6'}
           >
-            Confirm
+            {confirmText}
           </button>
         </div>
       </div>
@@ -65,45 +76,42 @@ export default function CodeEditor({ user, projectName, setProjectName }) {
   const [userInput, setUserInput] = useState('');
   const [messages, setMessages] = useState([]);
   const [chatInput, setChatInput] = useState('');
-  // roomParticipants should ideally store objects with { socketId, displayName, isAvailableForCall }
   const [roomParticipants, setRoomParticipants] = useState([]);
 
-  // WebRTC States
-  const [localStream, setLocalStream] = useState(null);
-  const peerConnections = useRef({}); // map of socketId => RTCPeerConnection
-  const remoteStreams = useRef({});    // map of socketId => MediaStream
-  const [remoteStreamIds, setRemoteStreamIds] = useState([]); // just for rendering video tiles
-  const [isCalling, setIsCalling] = useState(false); // True if user has initiated a call
-  const [incomingCall, setIncomingCall] = useState(null); // Stores { callerId, callerDisplayName }
-  const [callStatus, setCallStatus] = useState('idle'); // 'idle', 'calling', 'receiving', 'connected'
-
-  // File Deletion States for Confirmation Dialog
+  // Modal States
   const [showConfirmDialog, setShowConfirmDialog] = useState(false);
   const [confirmMessage, setConfirmMessage] = useState('');
   const [confirmAction, setConfirmAction] = useState(() => () => {}); // Function to execute on confirm
+  const [confirmTitle, setConfirmTitle] = useState('Confirmation');
+  const [confirmText, setConfirmText] = useState('Confirm');
+  const [confirmCancel, setConfirmCancel] = useState(() => () => setShowConfirmDialog(false));
+  const [showChatModal, setShowChatModal] = useState(false);
+  const [showParticipantsModal, setShowParticipantsModal] = useState(false);
+  const [showFilesModal, setShowFilesModal] = useState(false); 
+  
+  // --- 2. ADD NEW STATE FOR VISUALIZER ---
+  const [showVisualizerModal, setShowVisualizerModal] = useState(false);
+  const [visualizerTrace, setVisualizerTrace] = useState(null); // This will hold the JSON data
+  const [isLoading, setIsLoading] = useState(false); // To show loading state
+
 
   // State for other project assets (e.g., images, PDFs) stored in Firebase Storage
   const [projectAssets, setProjectAssets] = useState([]);
   const [savedProjectNames, setSavedProjectNames] = useState([]); // New state for saved project names
 
   // UI Resizing States
-  const [fileExplorerWidth, setFileExplorerWidth] = useState(200);
-  const [chatWidth, setChatWidth] = useState(300);
-  const [editorHeight, setEditorHeight] = useState(window.innerHeight * 0.5);
-  const [inputHeight, setInputHeight] = useState(100);
-  const [outputHeight, setOutputHeight] = useState(100);
+  const [ioWidth, setIoWidth] = useState(400); // Width for the Input/Output column
+  const [inputHeight, setInputHeight] = useState(window.innerHeight * 0.4); 
+  const [outputHeight, setOutputHeight] = useState(window.innerHeight * 0.4);
 
   // Refs
   const editorRef = useRef(null);
   const messagesEndRef = useRef(null);
 
-  const isResizingFileExplorer = useRef(false);
-  const isResizingChat = useRef(false);
-  const isResizingEditorInput = useRef(false);
+  const isResizingIO = useRef(false); // Ref for Editor/IO resizer
   const isResizingInputOutput = useRef(false);
 
-  const mainContentAreaRef = useRef(null);
-  const inputAreaRef = useRef(null);
+  const inputAreaRef = useRef(null); // Ref for the IO column wrapper
 
   const code = files[activeFile]?.code || '';
   const language = files[activeFile]?.language || 'cpp';
@@ -126,187 +134,7 @@ export default function CodeEditor({ user, projectName, setProjectName }) {
     }
   }, []);
 
-  // --- WebRTC Call Functions ---
-
-  const endCall = useCallback(() => {
-    // Stop local tracks
-    if (localStream) {
-      localStream.getTracks().forEach(track => track.stop());
-      setLocalStream(null);
-    }
-
-    // Close all peer connections
-    for (const socketId in peerConnections.current) {
-      if (peerConnections.current[socketId]) {
-        peerConnections.current[socketId].close();
-        delete peerConnections.current[socketId];
-      }
-    }
-    // Clear remote streams and their IDs
-    remoteStreams.current = {};
-    setRemoteStreamIds([]);
-
-    setIsCalling(false);
-    setIncomingCall(null);
-    setCallStatus('idle');
-
-    // Notify server that call is ended for this user
-    socket.emit('call-ended', { room: projectName });
-    console.log('Call ended.');
-  }, [localStream, projectName]);
-
-  const createPeerConnection = useCallback((remoteSocketId) => {
-    const pc = new RTCPeerConnection(iceServers);
-
-    peerConnections.current[remoteSocketId] = pc;
-
-    if (localStream) {
-      localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
-    }
-
-    pc.onicecandidate = (event) => {
-      if (event.candidate) {
-        socket.emit('webrtc-ice-candidate', {
-          room: projectName,
-          candidate: event.candidate,
-          targetSocketId: remoteSocketId,
-          senderSocketId: socket.id,
-        });
-      }
-    };
-
-    pc.ontrack = (event) => {
-      if (!remoteStreams.current[remoteSocketId]) {
-        remoteStreams.current[remoteSocketId] = new MediaStream();
-      }
-      // Add tracks to the remote stream
-      event.streams[0].getTracks().forEach(track => {
-        const existing = remoteStreams.current[remoteSocketId]
-          .getTracks()
-          .some(existingTrack => existingTrack.id === track.id);
-        if (!existing) {
-          remoteStreams.current[remoteSocketId].addTrack(track);
-        }
-      });
-      setRemoteStreamIds(prev => {
-        // Ensure unique IDs and trigger re-render
-        const newSet = new Set([...prev, remoteSocketId]);
-        return Array.from(newSet);
-      });
-    };
-
-    pc.onconnectionstatechange = () => {
-      console.log(`PC with ${remoteSocketId} connection state: ${pc.connectionState}`);
-      if (['disconnected', 'failed', 'closed'].includes(pc.connectionState)) {
-        console.log(`Peer ${remoteSocketId} disconnected or failed. Removing stream.`);
-        if (peerConnections.current[remoteSocketId]) {
-          peerConnections.current[remoteSocketId].close();
-          delete peerConnections.current[remoteSocketId];
-        }
-        if (remoteStreams.current[remoteSocketId]) {
-          delete remoteStreams.current[remoteSocketId];
-        }
-        setRemoteStreamIds(prev => prev.filter(id => id !== remoteSocketId));
-        if (Object.keys(peerConnections.current).length === 0 && callStatus === 'connected') {
-          endCall();
-        }
-      } else if (pc.connectionState === 'connected') {
-        setCallStatus('connected');
-      }
-    };
-
-    return pc;
-  }, [localStream, projectName, endCall, callStatus]);
-
-  <VideoTiles
-    localStream={localStream}
-    remoteStreamIds={remoteStreamIds}
-    remoteStreams={remoteStreams}
-  />;
-  // --- Start Call (call all peers in the room) ---
-  const startCall = async () => {
-    if (callStatus !== 'idle') {
-      alert("A call is already in progress or being received.");
-      return;
-    }
-    setIsCalling(true);
-    setCallStatus('calling');
-
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-      setLocalStream(stream);
-
-      // Emit call request to the server. The server will notify available peers.
-      socket.emit('call-request', {
-        room: projectName,
-        callerId: socket.id,
-        callerDisplayName: user.displayName || user.email || 'Anonymous',
-      });
-
-      // Optionally, create offers to existing available peers known locally
-      for (const participant of roomParticipants) {
-        if (participant.socketId !== socket.id && participant.isAvailableForCall) {
-          const pc = createPeerConnection(participant.socketId);
-          const offer = await pc.createOffer();
-          await pc.setLocalDescription(offer);
-          socket.emit('webrtc-offer', {
-            room: projectName,
-            offer: pc.localDescription,
-            targetSocketId: participant.socketId,
-            senderSocketId: socket.id,
-          });
-        }
-      }
-
-    } catch (error) {
-      console.error('Error starting call:', error);
-      alert('Failed to start call: Please ensure microphone and camera permissions are granted.');
-      setIsCalling(false);
-      setCallStatus('idle');
-    }
-  };
-
-  const acceptCall = useCallback(async () => {
-    if (!incomingCall) return;
-
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-      setLocalStream(stream);
-
-      // Retrieve the PC created when the offer was received
-      const pc = peerConnections.current[incomingCall.callerId];
-      if (!pc) {
-        console.error('PeerConnection not found for incoming call. Re-creating.');
-        const newPc = createPeerConnection(incomingCall.callerId);
-        stream.getTracks().forEach(track => newPc.addTrack(track, stream));
-      } else {
-        stream.getTracks().forEach(track => pc.addTrack(track, stream));
-      }
-
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
-      socket.emit('webrtc-answer', {
-        room: projectName,
-        answer: pc.localDescription,
-        targetSocketId: incomingCall.callerId,
-        senderSocketId: socket.id,
-      });
-
-      setCallStatus('connected');
-      setIncomingCall(null);
-      socket.emit('call-accepted', {
-        room: projectName,
-        callerSocketId: incomingCall.callerId,
-        calleeSocketId: socket.id,
-      });
-
-    } catch (error) {
-      console.error('Error accepting call:', error);
-      alert('Failed to accept call.');
-      endCall();
-    }
-  }, [incomingCall, projectName, createPeerConnection, endCall]);
-
+  
   // --- Socket.IO Event Handlers ---
   const handleCodeUpdate = useCallback(({ file, code }) => {
     setFiles(prev => ({
@@ -320,96 +148,8 @@ export default function CodeEditor({ user, projectName, setProjectName }) {
   }, []);
 
   const handleRoomUsersUpdate = useCallback((users) => {
-    // Assuming 'users' is now an array of objects: [{ socketId, displayName, isAvailableForCall }]
     setRoomParticipants(users);
   }, []);
-
-  const handleIncomingCall = useCallback(({ callerId, callerDisplayName }) => {
-    // Only process incoming call if currently idle
-    if (callStatus === 'idle') {
-      setIncomingCall({ callerId, callerDisplayName });
-      setCallStatus('receiving');
-      alert(`Incoming call from ${callerDisplayName}!`);
-      // Create peer connection immediately to prepare for the offer
-      createPeerConnection(callerId);
-    } else {
-      console.log(`Busy: Ignoring incoming call from ${callerDisplayName}`);
-      // Send a 'busy' signal back to the caller
-      socket.emit('call-busy', { targetSocketId: callerId, room: projectName });
-    }
-  }, [callStatus, projectName, createPeerConnection]);
-
-  const handleWebRTCOffer = useCallback(async ({ offer, senderSocketId }) => {
-    console.log('Received WebRTC Offer from:', senderSocketId);
-
-    const pc = peerConnections.current[senderSocketId] || createPeerConnection(senderSocketId);
-
-    try {
-      await pc.setRemoteDescription(new RTCSessionDescription(offer));
-      // If we are currently "receiving" a call, the acceptCall function will create the answer.
-      // This block might be needed for multi-peer offers or re-negotiations.
-      // For a simple client receiving an initial offer, `acceptCall` will handle the answer.
-    } catch (error) {
-      console.error('Error handling offer:', error);
-      if (pc) {
-          pc.close();
-          delete peerConnections.current[senderSocketId];
-      }
-    }
-  }, [projectName, createPeerConnection]);
-
-  const handleWebRTCAnswer = useCallback(async ({ answer, senderSocketId }) => {
-    console.log('Received WebRTC Answer from:', senderSocketId);
-    const pc = peerConnections.current[senderSocketId];
-    if (pc && pc.signalingState !== 'stable') {
-      try {
-        await pc.setRemoteDescription(new RTCSessionDescription(answer));
-        setCallStatus('connected'); // Set overall call status to connected if at least one peer is connected
-      } catch (error) {
-        console.error('Error handling answer:', error);
-      }
-    }
-  }, []);
-
-  const handleWebRTCICECandidate = useCallback(async ({ candidate, senderSocketId }) => {
-    const pc = peerConnections.current[senderSocketId];
-    if (pc && candidate) {
-      try {
-        await pc.addIceCandidate(new RTCIceCandidate(candidate));
-      } catch (error) {
-        console.error('Error adding received ICE candidate:', error);
-      }
-    }
-  }, []);
-
-  const handleCallEstablished = useCallback(({ remoteSocketId }) => {
-    console.log('Call established with:', remoteSocketId);
-    setCallStatus('connected');
-    setIncomingCall(null);
-    setIsCalling(false);
-  }, []);
-
-  const handleCallEnded = useCallback(() => {
-    console.log('Call ended by remote peer.');
-    endCall();
-  }, [endCall]);
-
-  const handleCallEndedByDisconnect = useCallback(({ disconnectedSocketId }) => {
-    console.log(`Partner ${disconnectedSocketId} disconnected, ending call for that peer.`);
-    if (peerConnections.current[disconnectedSocketId]) {
-      peerConnections.current[disconnectedSocketId].close();
-      delete peerConnections.current[disconnectedSocketId];
-    }
-    if (remoteStreams.current[disconnectedSocketId]) {
-      delete remoteStreams.current[disconnectedSocketId];
-    }
-    setRemoteStreamIds(prev => prev.filter(id => id !== disconnectedSocketId));
-
-    if (Object.keys(peerConnections.current).length === 0) {
-      endCall();
-      alert('Your call partner disconnected.');
-    }
-  }, [endCall]);
 
 
   // --- Socket.IO Room Joining and Listeners ---
@@ -429,35 +169,18 @@ export default function CodeEditor({ user, projectName, setProjectName }) {
     socket.on('code-update', handleCodeUpdate);
     socket.on('receive-message', handleReceiveMessage);
     socket.on('room-users-update', handleRoomUsersUpdate);
-    socket.on('incoming-call', handleIncomingCall);
-    socket.on('webrtc-offer', handleWebRTCOffer);
-    socket.on('webrtc-answer', handleWebRTCAnswer);
-    socket.on('webrtc-ice-candidate', handleWebRTCICECandidate);
-    socket.on('call-established', handleCallEstablished);
-    socket.on('call-ended', handleCallEnded);
-    socket.on('call-ended-by-disconnect', handleCallEndedByDisconnect);
-
+    
     return () => {
       socket.off('code-update', handleCodeUpdate);
       socket.off('receive-message', handleReceiveMessage);
       socket.off('room-users-update', handleRoomUsersUpdate);
-      socket.off('incoming-call', handleIncomingCall);
-      socket.off('webrtc-offer', handleWebRTCOffer);
-      socket.off('webrtc-answer', handleWebRTCAnswer);
-      socket.off('webrtc-ice-candidate', handleWebRTCICECandidate);
-      socket.off('call-established', handleCallEstablished);
-      socket.off('call-ended', handleCallEnded);
-      socket.off('call-ended-by-disconnect', handleCallEndedByDisconnect);
-      endCall();
     };
-  }, [projectName, endCall, handleCodeUpdate, handleReceiveMessage, handleRoomUsersUpdate,
-    handleIncomingCall, handleWebRTCOffer, handleWebRTCAnswer, handleWebRTCICECandidate,
-    handleCallEstablished, handleCallEnded, handleCallEndedByDisconnect]);
+  }, [projectName, handleCodeUpdate, handleReceiveMessage, handleRoomUsersUpdate]);
 
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+  }, [messages, showChatModal]);
 
 
   // --- Other Handlers (Code, Chat, Files, Resizing) ---
@@ -474,6 +197,39 @@ export default function CodeEditor({ user, projectName, setProjectName }) {
     });
   };
 
+  // --- 3. THIS IS THE NEW VISUALIZER FUNCTION ---
+  const openVisualizer = async () => {
+    setIsLoading(true);
+    setVisualizerTrace(null);
+    setOutput("⏳ Generating visualization...");
+
+    try {
+      const response = await axios.post(
+        `${process.env.REACT_APP_BACKEND_URL}/visualize`,   // ✅ FORCED BACKEND URL
+        { language, code },
+        {
+          headers: {
+            "Content-Type": "application/json"
+          }
+        }
+      );
+
+      if (response.data && response.data.trace) {
+        setVisualizerTrace(response.data.trace);
+        setShowVisualizerModal(true);
+        setOutput("✅ Visualization ready.");
+      } else {
+        setOutput(`❌ Visualizer error: ${response.data.error || "Unknown"}`);
+      }
+    } catch (error) {
+      console.error("Visualizer error:", error);
+      setOutput(`❌ Failed to get visualization:\n${error.message}`);
+    }
+
+    setIsLoading(false);
+  };
+
+
   const runCode = async () => {
     const languageId = languageMap[language];
     if (!languageId) {
@@ -481,6 +237,7 @@ export default function CodeEditor({ user, projectName, setProjectName }) {
       return;
     }
     setOutput('⏳ Running...');
+    setIsLoading(true); // Disable buttons
     try {
       const res = await axios.post(
         'https://judge0-ce.p.rapidapi.com/submissions?base64_encoded=false&wait=true',
@@ -514,6 +271,7 @@ export default function CodeEditor({ user, projectName, setProjectName }) {
         setOutput('❌ Failed to run code. An unexpected error occurred. Check console for details.');
       }
     }
+    setIsLoading(false); // Re-enable buttons
   };
 
   const saveProject = async () => {
@@ -556,10 +314,11 @@ export default function CodeEditor({ user, projectName, setProjectName }) {
       const names = [];
       snap.forEach(doc => names.push(doc.id));
 
+      setConfirmTitle('Load Project');
       setConfirmMessage(
         <div>
           <p>Choose a project to load:</p>
-          <ul style={{ listStyleType: 'none', padding: 0, margin: 0, maxHeight: '150px', overflowY: 'auto', border: '1px solid #444', borderRadius: '5px', padding: '10px', backgroundColor: '#161b22' }}>
+          <ul style={{ listStyleType: 'none', padding: 0, margin: 0, maxHeight: '250px', overflowY: 'auto', border: '1px solid #444', borderRadius: '5px', padding: '10px', backgroundColor: '#161b22' }}>
             {names.map((name) => (
               <li key={name} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '5px', borderBottom: '1px solid #30363d' }}>
                 <span style={{ cursor: 'pointer', color: '#58a6ff' }} onClick={() => handleLoadProjectSelection(name)}>{name}</span>
@@ -580,7 +339,10 @@ export default function CodeEditor({ user, projectName, setProjectName }) {
           <p style={{ marginTop: '10px', fontSize: '0.9em', color: '#8b949e' }}>Click on a project name to load it.</p>
         </div>
       );
-      setConfirmAction(() => () => setShowConfirmDialog(false)); // Close dialog if no selection is made via buttons
+      // This modal is just for display, the actions are inline
+      setConfirmAction(() => () => setShowConfirmDialog(false));
+      setConfirmCancel(null); // Hide cancel button
+      setConfirmText('Close');
       setShowConfirmDialog(true);
 
     } catch (error) {
@@ -634,19 +396,31 @@ export default function CodeEditor({ user, projectName, setProjectName }) {
       alert(`❌ Failed to delete project: ${error.message}`);
       return false;
     }
-  }, [user, projectName]);
+  }, [user, projectName, setProjectName]); // Added setProjectName dependency
+
+  // This now uses the generic modal state
+  const showModal = (title, message, onConfirm, confirmText = "Confirm", onCancel = () => setShowConfirmDialog(false)) => {
+    setConfirmTitle(title);
+    setConfirmMessage(message);
+    setConfirmAction(() => onConfirm);
+    setConfirmCancel(() => onCancel);
+    setConfirmText(confirmText);
+    setShowConfirmDialog(true);
+  };
 
   // Handler for clicking delete button next to a project name in the load list
   const handleDeleteProjectClick = (nameToDelete) => {
-    setConfirmMessage(`Are you sure you want to delete the project '${nameToDelete}'? This will delete all its code files. This cannot be undone.`);
-    setConfirmAction(() => async () => {
-      const success = await deleteProjectFromFirestore(nameToDelete);
-      if (success) {
-        // No need to filter savedProjectNames here, fetchSavedProjects will refresh
+    // This will open a *new* confirmation dialog over the load dialog
+    showModal(
+      'Delete Project',
+      `Are you sure you want to delete the project '${nameToDelete}'? This will delete all its code files. This cannot be undone.`,
+      async () => {
+        const success = await deleteProjectFromFirestore(nameToDelete);
+        if (success) {
+          setShowConfirmDialog(false); // Close the delete confirmation
+        }
       }
-      setShowConfirmDialog(false);
-    });
-    setShowConfirmDialog(true);
+    );
   };
 
 
@@ -674,37 +448,41 @@ export default function CodeEditor({ user, projectName, setProjectName }) {
       return;
     }
 
-    setConfirmMessage(`Are you sure you want to delete the code file '${name}'? This cannot be undone.`);
-    setConfirmAction(() => async () => {
-      const { [name]: _, ...rest } = files;
-      setFiles(rest);
-      if (activeFile === name) {
-        const remainingFileNames = Object.keys(rest);
-        if (remainingFileNames.length > 0) {
-          setActiveFile(remainingFileNames[0]);
-        } else {
-          setFiles({ 'main.cpp': { code: '// Start coding...', language: 'cpp' } });
-          setActiveFile('main.cpp');
+    showModal(
+      'Delete Code File',
+      `Are you sure you want to delete the code file '${name}'? This cannot be undone.`,
+      async () => {
+        const { [name]: _, ...rest } = files;
+        setFiles(rest);
+        if (activeFile === name) {
+          const remainingFileNames = Object.keys(rest);
+          if (remainingFileNames.length > 0) {
+            setActiveFile(remainingFileNames[0]);
+          } else {
+            setFiles({ 'main.cpp': { code: '// Start coding...', language: 'cpp' } });
+            setActiveFile('main.cpp');
+          }
         }
+        alert(`✅ Code file '${name}' deleted.`);
+        setShowConfirmDialog(false);
       }
-      alert(`✅ Code file '${name}' deleted.`);
-      setShowConfirmDialog(false);
-    });
-    setShowConfirmDialog(true);
+    );
   };
 
   // Handles deletion of other project assets (stored in Firebase Storage)
   const deleteProjectAsset = (asset) => {
-    setConfirmMessage(`Are you sure you want to delete the asset '${asset.name}' from storage? This cannot be undone.`);
-    setConfirmAction(() => async () => {
-      const success = await deleteFileFromFirebaseStorage(asset.path);
-      if (success) {
-        setProjectAssets(prev => prev.filter(a => a.path !== asset.path));
-        alert(`✅ Asset '${asset.name}' deleted from storage.`);
+    showModal(
+      'Delete Project Asset',
+      `Are you sure you want to delete the asset '${asset.name}' from storage? This cannot be undone.`,
+      async () => {
+        const success = await deleteFileFromFirebaseStorage(asset.path);
+        if (success) {
+          setProjectAssets(prev => prev.filter(a => a.path !== asset.path));
+          alert(`✅ Asset '${asset.name}' deleted from storage.`);
+        }
+        setShowConfirmDialog(false);
       }
-      setShowConfirmDialog(false);
-    });
-    setShowConfirmDialog(true);
+    );
   };
 
   // Function to upload a file to Firebase Storage
@@ -796,36 +574,27 @@ export default function CodeEditor({ user, projectName, setProjectName }) {
   };
 
   // --- Resizing Logic ---
-  const startResizingFileExplorer = useCallback((e) => { isResizingFileExplorer.current = true; e.preventDefault(); }, []);
-  const startResizingChat = useCallback((e) => { isResizingChat.current = true; e.preventDefault(); }, []);
-  const startResizingEditorInput = useCallback((e) => { isResizingEditorInput.current = true; e.preventDefault(); }, []);
+  const startResizingIO = useCallback((e) => { isResizingIO.current = true; e.preventDefault(); }, []);
   const startResizingInputOutput = useCallback((e) => { isResizingInputOutput.current = true; e.preventDefault(); }, []);
 
 
   const onMouseMove = useCallback((e) => {
-    if (!mainContentAreaRef.current || !inputAreaRef.current) { return; }
-    if (isResizingFileExplorer.current) {
-      const newWidth = e.clientX;
-      setFileExplorerWidth(Math.max(100, Math.min(newWidth, window.innerWidth - chatWidth - 200)));
-    } else if (isResizingChat.current) {
+    if (!inputAreaRef.current) { return; }
+
+    if (isResizingIO.current) {
       const newWidth = window.innerWidth - e.clientX;
-      setChatWidth(Math.max(200, Math.min(newWidth, window.innerWidth - fileExplorerWidth - 200)));
-    } else if (isResizingEditorInput.current) {
-      const mainContentRect = mainContentAreaRef.current.getBoundingClientRect();
-      const newEditorHeight = e.clientY - mainContentRect.top - 60; // 60 for header height
-      setEditorHeight(Math.max(100, newEditorHeight));
+      setIoWidth(Math.max(200, Math.min(newWidth, window.innerWidth - 200))); // 200 is min editor width
     } else if (isResizingInputOutput.current) {
-      const inputRect = inputAreaRef.current.getBoundingClientRect();
-      const deltaY = e.clientY - inputRect.bottom;
-      setInputHeight(prev => Math.max(50, prev + deltaY));
-      setOutputHeight(prev => Math.max(50, prev - deltaY));
+      const ioColumnRect = inputAreaRef.current.getBoundingClientRect();
+      const newHeaderHeight = e.clientY - ioColumnRect.top;
+      const totalHeight = ioColumnRect.height - 40; // 40 for "Input (stdin)" header
+      setInputHeight(Math.max(50, Math.min(newHeaderHeight, totalHeight - 50)));
+      setOutputHeight(totalHeight - newHeaderHeight);
     }
-  }, [fileExplorerWidth, chatWidth]);
+  }, [ioWidth]); 
 
   const onMouseUp = useCallback(() => {
-    isResizingFileExplorer.current = false;
-    isResizingChat.current = false;
-    isResizingEditorInput.current = false;
+    isResizingIO.current = false;
     isResizingInputOutput.current = false;
   }, []);
 
@@ -837,42 +606,6 @@ export default function CodeEditor({ user, projectName, setProjectName }) {
       window.removeEventListener('mouseup', onMouseUp);
     };
   }, [onMouseMove, onMouseUp]);
-
-
-  // Inline VideoTiles component or render directly
-  const VideoTiles = ({ localStream, remoteStreamIds, remoteStreams}) => {
-    return (
-      <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'center', gap: '10px' }}>
-        {/* Local Video */}
-        {localStream && (
-          <video
-            key="local"
-            autoPlay
-            muted
-            playsInline
-            ref={el => { if (el) el.srcObject = localStream; }}
-            style={{ width: '160px', height: '120px', borderRadius: '8px', border: '2px solid #58a6ff' }}
-          />
-        )}
-
-        {/* Remote Videos */}
-        {remoteStreamIds.map(socketId => (
-          <video
-            key={socketId}
-            autoPlay
-            playsInline
-            ref={el => {
-              const stream = remoteStreams?.current?.[socketId];
-            if (el && stream) {
-              el.srcObject = stream;
-            }
-            }}
-            style={{ width: '240px', height: '180px', borderRadius: '8px', border: '2px solid #2ea44f' }}
-          />
-        ))}
-      </div>
-    );
-  };
 
 
   // Render the "Enter Room / Project Name" screen if projectName is null or empty
@@ -923,186 +656,215 @@ export default function CodeEditor({ user, projectName, setProjectName }) {
     );
   }
 
-  // Main editor UI
-  return (
-    <div style={{ display: 'flex', height: 'calc(100vh - 60px)', backgroundColor: '#0d1117', color: '#c9d1d9', overflow: 'hidden' }}>
-      {/* File Explorer / Sidebar */}
-      <div style={{ width: fileExplorerWidth, borderRight: '1px solid #30363d', padding: '10px', display: 'flex', flexDirection: 'column', flexShrink: 0 }}>
-        <h3 style={{ marginTop: 0, marginBottom: '15px', color: '#58a6ff' }}>Code Files</h3>
-        <div style={{ overflowY: 'auto', flexGrow: 1 }}>
-          {Object.keys(files).map((name) => (
-            <div
-              key={name}
-              onClick={() => setActiveFile(name)}
+  // --- 4. MODIFY RENDERHEADERBUTTON TO HANDLE LOADING ---
+  const renderHeaderButton = (text, onClick, styleProps = {}) => (
+    <button
+      onClick={onClick}
+      disabled={isLoading} // Disable button when loading
+      style={{
+        padding: '8px 12px',
+        backgroundColor: '#0366d6',
+        color: 'white',
+        border: 'none',
+        borderRadius: '5px',
+        cursor: isLoading ? 'not-allowed' : 'pointer', // Change cursor when loading
+        transition: 'background-color 0.2s ease, opacity 0.2s ease',
+        opacity: isLoading ? 0.6 : 1, // Fade button when loading
+        ...styleProps,
+      }}
+      onMouseEnter={(e) => { if (!isLoading) e.target.style.backgroundColor = styleProps.backgroundColor ? `${styleProps.backgroundColor}90` : '#005cc5'}}
+      onMouseLeave={(e) => { if (!isLoading) e.target.style.backgroundColor = styleProps.backgroundColor || '#0366d6'}}
+    >
+      {text}
+    </button>
+  );
+
+  // --- Helper function for chat modal content ---
+  const renderChatContent = () => (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '60vh' }}>
+      <div style={{ flexGrow: 1, overflowY: 'auto', backgroundColor: '#0d1117', borderRadius: '5px', padding: '10px', marginBottom: '10px', border: '1px solid #30363d' }}>
+        {messages.map((msg, index) => (
+          <React.Fragment key={index}>
+            <div style={{ marginBottom: '8px', padding: '5px', borderRadius: '5px', backgroundColor: msg.userId === user.uid ? '#21262d' : '#161b22' }}>
+              <strong style={{ color: msg.userId === user.uid ? '#2ea44f' : '#58a6ff' }}>{msg.sender}</strong>
+              <span style={{ fontSize: '0.7em', color: '#8b949e', marginLeft: '10px' }}>{msg.timestamp}</span>
+            </div>
+            <p style={{ margin: 0, wordBreak: 'break-word', marginLeft: '5px', marginBottom: '8px' }}>{msg.text}</p>
+          </React.Fragment>
+        ))}
+        <div ref={messagesEndRef} />
+      </div>
+      <div style={{ padding: '10px', borderTop: '1px solid #30363d', display: 'flex', alignItems: 'center', gap: '5px', flexShrink: 0 }}>
+        <input
+          type="text"
+          value={chatInput}
+          onChange={(e) => setChatInput(e.target.value)}
+          onKeyPress={(e) => { if (e.key === 'Enter') sendMessage(); }}
+          placeholder="Type your message..."
+          style={{
+            flexGrow: 1, padding: '8px', borderRadius: '5px', border: '1px solid #444',
+            backgroundColor: '#0d1117', color: '#c9d1d9',
+          }}
+        />
+        <button
+          onClick={sendMessage}
+          style={{
+            padding: '8px 15px', backgroundColor: '#0366d6', color: 'white', border: 'none',
+            borderRadius: '5px', cursor: 'pointer', transition: 'background-color 0.2s ease'
+          }}
+          onMouseEnter={(e) => e.target.style.backgroundColor = '#005cc5'}
+          onMouseLeave={(e) => e.target.style.backgroundColor = '#0366d6'}
+        >
+          Send
+        </button>
+      </div>
+    </div>
+  );
+
+  // --- Helper function for participants modal content ---
+  const renderParticipantsContent = () => (
+    <ul style={{ listStyleType: 'none', padding: 0, margin: 0 }}>
+      {roomParticipants.map((p, index) => (
+        <li key={index} style={{ color: '#c9d1d9', fontSize: '1.1em', padding: '5px 0' }}>
+          {p.displayName} {p.socketId === socket.id ? '(You)' : ''}
+        </li>
+      ))}
+    </ul>
+  );
+
+  // --- Helper function for File Explorer modal content ---
+  const renderFileExplorerContent = () => (
+    <div style={{ display: 'flex', flexDirection: 'column', minHeight: '50vh' }}>
+      <h3 style={{ marginTop: 0, marginBottom: '15px', color: '#58a6ff' }}>Code Files</h3>
+      <div style={{ overflowY: 'auto', flexGrow: 1, minHeight: '150px' }}>
+        {Object.keys(files).map((name) => (
+          <div
+            key={name}
+            onClick={() => {
+              setActiveFile(name);
+              setShowFilesModal(false); // Close modal on file select
+            }}
+            style={{
+              padding: '8px',
+              cursor: 'pointer',
+              backgroundColor: activeFile === name ? '#21262d' : 'transparent', // Highlight active file
+              borderRadius: '5px',
+              marginBottom: '5px',
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              border: activeFile === name ? '1px solid #30363d' : '1px solid transparent',
+              transition: 'background-color 0.2s ease',
+            }}
+            onMouseEnter={(e) => e.currentTarget.style.backgroundColor = activeFile === name ? '#21262d' : '#161b2250'}
+            onMouseLeave={(e) => e.currentTarget.style.backgroundColor = activeFile === name ? '#21262d' : 'transparent'}
+          >
+            <span>{name}</span>
+            <button
+              onClick={(e) => { e.stopPropagation(); deleteCodeFile(name); }}
               style={{
-                padding: '8px',
-                cursor: 'pointer',
-                backgroundColor: activeFile === name ? '#161b22' : 'transparent',
-                borderRadius: '5px',
-                marginBottom: '5px',
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                border: activeFile === name ? '1px solid #30363d' : '1px solid transparent',
-                transition: 'background-color 0.2s ease',
+                backgroundColor: '#da3633', color: 'white', border: 'none', borderRadius: '3px',
+                padding: '3px 7px', cursor: 'pointer', fontSize: '0.7em', transition: 'background-color 0.2s ease',
               }}
-              onMouseEnter={(e) => e.currentTarget.style.backgroundColor = activeFile === name ? '#161b22' : '#161b2250'}
-              onMouseLeave={(e) => e.currentTarget.style.backgroundColor = activeFile === name ? '#161b22' : 'transparent'}
+              onMouseEnter={(e) => e.target.style.backgroundColor = '#bd2c00'}
+              onMouseLeave={(e) => e.target.style.backgroundColor = '#da3633'}
             >
-              <span>{name}</span>
+              X
+            </button>
+          </div>
+        ))}
+      </div>
+      <button
+        onClick={createNewFile}
+        style={{
+          marginTop: '10px', padding: '8px 12px', backgroundColor: '#2ea44f', color: 'white',
+          border: 'none', borderRadius: '5px', cursor: 'pointer', transition: 'background-color 0.2s ease',
+        }}
+        onMouseEnter={(e) => e.target.style.backgroundColor = '#2c974b'}
+        onMouseLeave={(e) => e.target.style.backgroundColor = '#2ea44f'}
+      >
+        + New Code File
+      </button>
+
+      {/* Project Assets Section (Files from Firebase Storage) */}
+      <h3 style={{ marginTop: '20px', marginBottom: '15px', color: '#58a6ff' }}>Project Assets</h3>
+      <div style={{ overflowY: 'auto', flexGrow: 1, minHeight: '150px' }}>
+        {projectAssets.length === 0 ? (
+          <p style={{ fontSize: '0.9em', color: '#8b949e' }}>No assets found.</p>
+        ) : (
+          projectAssets.map((asset) => (
+            <div
+              key={asset.path}
+              style={{
+                padding: '8px', backgroundColor: '#161b22', borderRadius: '5px',
+                marginBottom: '5px', display: 'flex', justifyContent: 'space-between',
+                alignItems: 'center', border: '1px solid #30363d',
+              }}
+            >
+              <span style={{ fontSize: '0.9em' }}>{asset.name}</span>
               <button
-                onClick={(e) => { e.stopPropagation(); deleteCodeFile(name); }} // Use deleteCodeFile
+                onClick={() => deleteProjectAsset(asset)}
                 style={{
-                  backgroundColor: '#da3633',
-                  color: 'white',
-                  border: 'none',
-                  borderRadius: '3px',
-                  padding: '3px 7px',
-                  cursor: 'pointer',
-                  fontSize: '0.7em',
-                  transition: 'background-color 0.2s ease',
+                  backgroundColor: '#da3633', color: 'white', border: 'none',
+                  borderRadius: '3px', padding: '3px 7px', cursor: 'pointer',
+                  fontSize: '0.7em', transition: 'background-color 0.2s ease',
                 }}
                 onMouseEnter={(e) => e.target.style.backgroundColor = '#bd2c00'}
                 onMouseLeave={(e) => e.target.style.backgroundColor = '#da3633'}
               >
-                X
+                Delete
               </button>
             </div>
-          ))}
-        </div>
+          ))
+        )}
+        {/* Upload Asset Button */}
+        <input
+          type="file"
+          id="asset-upload"
+          style={{ display: 'none' }}
+          onChange={(e) => {
+            if (e.target.files[0]) {
+              uploadProjectAsset(e.target.files[0]);
+            }
+          }}
+        />
         <button
-          onClick={createNewFile}
+          onClick={() => document.getElementById('asset-upload').click()}
           style={{
-            marginTop: '10px',
-            padding: '8px 12px',
-            backgroundColor: '#2ea44f',
-            color: 'white',
-            border: 'none',
-            borderRadius: '5px',
-            cursor: 'pointer',
+            marginTop: '10px', padding: '8px 12px', backgroundColor: '#007bff',
+            color: 'white', border: 'none', borderRadius: '5px', cursor: 'pointer',
             transition: 'background-color 0.2s ease',
           }}
-          onMouseEnter={(e) => e.target.style.backgroundColor = '#2c974b'}
-          onMouseLeave={(e) => e.target.style.backgroundColor = '#2ea44f'}
+          onMouseEnter={(e) => e.target.style.backgroundColor = '#0056b3'}
+          onMouseLeave={(e) => e.target.style.backgroundColor = '#007bff'}
         >
-          + New Code File
+          ⬆️ Upload Asset
         </button>
-
-        {/* Project Assets Section (Files from Firebase Storage) */}
-        <h3 style={{ marginTop: '20px', marginBottom: '15px', color: '#58a6ff' }}>Project Assets</h3>
-        <div style={{ overflowY: 'auto', flexGrow: 1 }}>
-          {projectAssets.length === 0 ? (
-            <p style={{ fontSize: '0.9em', color: '#8b949e' }}>No assets found.</p>
-          ) : (
-            projectAssets.map((asset) => (
-              <div
-                key={asset.path}
-                style={{
-                  padding: '8px',
-                  backgroundColor: '#161b22',
-                  borderRadius: '5px',
-                  marginBottom: '5px',
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'center',
-                  border: '1px solid #30363d',
-                }}
-              >
-                <span style={{ fontSize: '0.9em' }}>{asset.name}</span>
-                <button
-                  onClick={() => deleteProjectAsset(asset)} // Use deleteProjectAsset
-                  style={{
-                    backgroundColor: '#da3633',
-                    color: 'white',
-                    border: 'none',
-                    borderRadius: '3px',
-                    padding: '3px 7px',
-                    cursor: 'pointer',
-                    fontSize: '0.7em',
-                    transition: 'background-color 0.2s ease',
-                  }}
-                  onMouseEnter={(e) => e.target.style.backgroundColor = '#bd2c00'}
-                  onMouseLeave={(e) => e.target.style.backgroundColor = '#da3633'}
-                >
-                  Delete
-                </button>
-              </div>
-            ))
-          )}
-          {/* Upload Asset Button */}
-          <input
-            type="file"
-            id="asset-upload"
-            style={{ display: 'none' }}
-            onChange={(e) => {
-              if (e.target.files[0]) {
-                uploadProjectAsset(e.target.files[0]);
-              }
-            }}
-          />
-          <button
-            onClick={() => document.getElementById('asset-upload').click()}
-            style={{
-              marginTop: '10px',
-              padding: '8px 12px',
-              backgroundColor: '#007bff',
-              color: 'white',
-              border: 'none',
-              borderRadius: '5px',
-              cursor: 'pointer',
-              transition: 'background-color 0.2s ease',
-            }}
-            onMouseEnter={(e) => e.target.style.backgroundColor = '#0056b3'}
-            onMouseLeave={(e) => e.target.style.backgroundColor = '#007bff'}
-          >
-            ⬆️ Upload Asset
-          </button>
-        </div>
       </div>
+    </div>
+  );
 
-      {/* Resizer for File Explorer */}
-      <div
-        onMouseDown={startResizingFileExplorer}
-        style={{
-          width: '5px',
-          cursor: 'col-resize',
-          backgroundColor: '#30363d',
-          flexShrink: 0,
-        }}
-      />
-
-      {/* Editor and Output Area */}
-      <div className="main-content-area" ref={mainContentAreaRef} style={{ flexGrow: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-        <div style={{ padding: '10px 20px', backgroundColor: '#1e1e1e', borderBottom: '1px solid #30363d', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexShrink: 0 }}>
-          <h3 style={{ margin: 0, color: '#c9d1d9' }}>Project: {projectName}</h3>
-          <span style={{ fontSize: '0.9em', color: '#8b949e' }}>
-            Current User: {user.displayName || user.email} (ID: {user.uid})
-          </span>
+  // --- Main editor UI (Refactored) ---
+  return (
+    <div style={{ display: 'flex', height: 'calc(100vh - 60px)', backgroundColor: '#0d1117', color: '#c9d1d9', overflow: 'hidden' }}>
+      
+      {/* --- Editor Area (Column 1) --- */}
+      <div className="editor-area" style={{ flexGrow: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        <div style={{ padding: '10px 20px', backgroundColor: '#1e1e1e', borderBottom: '1px solid #30363d', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexShrink: 0, gap: '10px' }}>
+          <h3 style={{ margin: 0, color: '#c9d1d9', whiteSpace: 'nowrap' }}>Project: {projectName}</h3>
+          <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+            {renderHeaderButton('📁 Project Files', () => setShowFilesModal(true))}
+            {renderHeaderButton(isLoading && !visualizerTrace ? 'Running...' : '▶️ Run Code', runCode, { backgroundColor: '#2ea44f' })}
+            {renderHeaderButton(isLoading && visualizerTrace ? 'Visualizing...' : '👁️ Visualize', openVisualizer, { backgroundColor: '#17a2b8' })}
+            {renderHeaderButton('💾 Save', saveProject, { backgroundColor: '#007bff' })}
+            {renderHeaderButton('📂 Load', loadProject, { backgroundColor: '#8957e5' })}
+            {renderHeaderButton('💬 Chat', () => setShowChatModal(true))}
+            {renderHeaderButton('👥 Participants', () => setShowParticipantsModal(true))}
+          </div>
         </div>
-
-        {/* WebRTC Video Section - Using the VideoTiles component */}
-        {callStatus !== 'idle' || isCalling || incomingCall ? (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', padding: '10px', backgroundColor: '#21262d', borderBottom: '1px solid #30363d', justifyContent: 'center', alignItems: 'center' }}>
-            <VideoTiles localStream={localStream} remoteStreamIds={remoteStreamIds} remoteStreams={remoteStreams}/>
-            {callStatus === 'calling' && !Object.keys(peerConnections.current).length && <p style={{ color: '#8b949e' }}>Calling...</p>}
-            {callStatus === 'receiving' && incomingCall && (
-              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '5px' }}>
-                <p style={{ margin: 0, color: '#c9d1d9' }}>Incoming call from {incomingCall.callerDisplayName}</p>
-                <button onClick={acceptCall} style={{ padding: '8px 15px', backgroundColor: '#28a745', color: 'white', border: 'none', borderRadius: '5px', cursor: 'pointer' }}>Accept</button>
-              </div>
-            )}
-            {(callStatus === 'connected' || Object.keys(peerConnections.current).length > 0) && (
-              <button onClick={endCall} style={{ padding: '8px 15px', backgroundColor: '#dc3545', color: 'white', border: 'none', borderRadius: '5px', cursor: 'pointer' }}>End Call</button>
-            )}
-          </div>
-        ) : (
-          <div style={{ padding: '10px', backgroundColor: '#1e1e1e', borderBottom: '1px solid #30363d', display: 'flex', justifyContent: 'center' }}>
-            <button onClick={startCall} style={{ padding: '8px 15px', backgroundColor: '#007bff', color: 'white', border: 'none', borderRadius: '5px', cursor: 'pointer' }}>Start Call</button>
-          </div>
-        )}
 
         {/* Monaco Editor */}
-        <div style={{ height: editorHeight, flexShrink: 0 }}>
+        <div style={{ flexGrow: 1, height: '100%', overflow: 'hidden' }}>
           <Editor
             height="100%"
             language={language}
@@ -1118,69 +880,11 @@ export default function CodeEditor({ user, projectName, setProjectName }) {
             }}
           />
         </div>
-
-        {/* Resizer for Editor/Input */}
-        <div
-          onMouseDown={startResizingEditorInput}
-          style={{
-            height: '5px',
-            cursor: 'row-resize',
-            backgroundColor: '#30363d',
-            flexShrink: 0,
-          }}
-        />
-
-        {/* Input and Output Area */}
-        <div ref={inputAreaRef} style={{ display: 'flex', flexDirection: 'column', flexGrow: 1, minHeight: '100px' }}>
-          {/* Input Section */}
-          <div style={{ height: inputHeight, display: 'flex', flexDirection: 'column', padding: '10px', borderBottom: '1px solid #30363d', backgroundColor: '#1e1e1e', flexShrink: 0 }}>
-            <h3 style={{ margin: '0 0 10px 0', color: '#c9d1d9' }}>Input (stdin)</h3>
-            <textarea
-              value={userInput}
-              onChange={(e) => setUserInput(e.target.value)}
-              placeholder="Enter input for your code here..."
-              style={{
-                flexGrow: 1, padding: '8px', borderRadius: '5px', border: '1px solid #444',
-                backgroundColor: '#0d1117', color: '#c9d1d9', resize: 'none'
-              }}
-            />
-          </div>
-
-          {/* Resizer for Input/Output */}
-          <div
-            onMouseDown={startResizingInputOutput}
-            style={{
-              height: '5px',
-              cursor: 'row-resize',
-              backgroundColor: '#30363d',
-              flexShrink: 0,
-            }}
-          />
-
-          {/* Output Section */}
-          <div style={{ height: outputHeight, display: 'flex', flexDirection: 'column', padding: '10px', backgroundColor: '#1e1e1e', flexGrow: 1, minHeight: '50px' }}>
-            <h3 style={{ margin: '0 0 10px 0', color: '#c9d1d9' }}>Output (stdout/stderr)</h3>
-            <pre style={{ flexGrow: 1, padding: '8px', borderRadius: '5px', border: '1px solid #444', backgroundColor: '#0d1117', color: '#c9d1d9', overflow: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
-              {output}
-            </pre>
-            <button
-              onClick={runCode}
-              style={{
-                marginTop: '10px', padding: '10px 20px', backgroundColor: '#0366d6', color: 'white',
-                border: 'none', borderRadius: '5px', cursor: 'pointer', transition: 'background-color 0.2s ease'
-              }}
-              onMouseEnter={(e) => e.target.style.backgroundColor = '#005cc5'}
-              onMouseLeave={(e) => e.target.style.backgroundColor = '#0366d6'}
-            >
-              ▶️ Run Code
-            </button>
-          </div>
-        </div>
       </div>
 
-      {/* Resizer for Chat */}
+      {/* --- Resizer for Editor/IO --- */}
       <div
-        onMouseDown={startResizingChat}
+        onMouseDown={startResizingIO}
         style={{
           width: '5px',
           cursor: 'col-resize',
@@ -1189,96 +893,103 @@ export default function CodeEditor({ user, projectName, setProjectName }) {
         }}
       />
 
-      {/* Chat and Controls Area */}
-      <div style={{ width: chatWidth, borderLeft: '1px solid #30363d', padding: '10px', display: 'flex', flexDirection: 'column', flexShrink: 0, backgroundColor: '#161b22' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px' }}>
-          <h3 style={{ margin: 0, color: '#58a6ff' }}>Room: {projectName}</h3>
-          <div style={{ display: 'flex', gap: '10px' }}>
-            <button
-              onClick={saveProject}
-              style={{
-                padding: '8px 12px', backgroundColor: '#2ea44f', color: 'white', border: 'none',
-                borderRadius: '5px', cursor: 'pointer', transition: 'background-color 0.2s ease'
-              }}
-              onMouseEnter={(e) => e.target.style.backgroundColor = '#2c974b'}
-              onMouseLeave={(e) => e.target.style.backgroundColor = '#2ea44f'}
-            >
-              💾 Save
-            </button>
-            <button
-              onClick={loadProject}
-              style={{
-                padding: '8px 12px', backgroundColor: '#8957e5', color: 'white', border: 'none',
-                borderRadius: '5px', cursor: 'pointer', transition: 'background-color 0.2s ease'
-              }}
-              onMouseEnter={(e) => e.target.style.backgroundColor = '#7a4ad2'}
-              onMouseLeave={(e) => e.target.style.backgroundColor = '#8957e5'}
-            >
-              📂 Load
-            </button>
-          </div>
+      {/* --- Input and Output Area (Column 2) --- */}
+      <div ref={inputAreaRef} style={{ width: ioWidth, display: 'flex', flexDirection: 'column', flexShrink: 0, backgroundColor: '#1e1e1e', borderLeft: '1px solid #30363d' }}>
+        {/* Input Section */}
+        <div style={{ height: inputHeight, display: 'flex', flexDirection: 'column', padding: '10px', borderBottom: '1px solid #30363d', overflow: 'hidden' }}>
+          <h3 style={{ margin: '0 0 10px 0', color: '#c9d1d9', flexShrink: 0 }}>Input (stdin)</h3>
+          <textarea
+            value={userInput}
+            onChange={(e) => setUserInput(e.target.value)}
+            placeholder="Enter input for your code here..."
+            style={{
+              flexGrow: 1, padding: '8px', borderRadius: '5px', border: '1px solid #444',
+              backgroundColor: '#0d1117', color: '#c9d1d9', resize: 'none', width: 'auto'
+            }}
+          />
         </div>
 
-        <div style={{ marginBottom: '15px' }}>
-          <h4 style={{ margin: '0 0 5px 0', color: '#c9d1d9' }}>Participants:</h4>
-          <ul style={{ listStyleType: 'none', padding: 0, margin: 0 }}>
-            {roomParticipants.map((p, index) => (
-              <li key={index} style={{ color: '#8b949e', fontSize: '0.9em' }}>
-                {p.displayName} {p.socketId === socket.id ? '(You)' : ''}
-                {/* Display 'In Call' only if isAvailableForCall is explicitly false */}
-                {p.isAvailableForCall === false && <span style={{ color: '#dc3545', marginLeft: '5px' }}> (In Call)</span>}
-              </li>
-            ))}
-          </ul>
-        </div>
+        {/* Resizer for Input/Output */}
+        <div
+          onMouseDown={startResizingInputOutput}
+          style={{
+            height: '5px',
+            cursor: 'row-resize',
+            backgroundColor: '#30363d',
+            flexShrink: 0,
+          }}
+        />
 
-        <div style={{ flexGrow: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-          <h4 style={{ margin: '0 0 10px 0', color: '#c9d1d9' }}>Chat:</h4>
-          <div style={{ flexGrow: 1, overflowY: 'auto', backgroundColor: '#0d1117', borderRadius: '5px', padding: '10px', marginBottom: '10px', border: '1px solid #30363d' }}>
-            {messages.map((msg, index) => (
-              <React.Fragment key={index}>
-                <div style={{ marginBottom: '8px', padding: '5px', borderRadius: '5px', backgroundColor: msg.userId === user.uid ? '#21262d' : '#161b22' }}>
-                  <strong style={{ color: msg.userId === user.uid ? '#2ea44f' : '#58a6ff' }}>{msg.sender}</strong>
-                  <span style={{ fontSize: '0.7em', color: '#8b949e', marginLeft: '10px' }}>{msg.timestamp}</span>
-                </div>
-                <p style={{ margin: 0, wordBreak: 'break-word', marginLeft: '5px', marginBottom: '8px' }}>{msg.text}</p>
-              </React.Fragment>
-            ))}
-            <div ref={messagesEndRef} />
-          </div>
-          <div style={{ padding: '10px', borderTop: '1px solid #30363d', display: 'flex', alignItems: 'center', gap: '5px', flexShrink: 0 }}>
-            <input
-              type="text"
-              value={chatInput}
-              onChange={(e) => setChatInput(e.target.value)}
-              onKeyPress={(e) => { if (e.key === 'Enter') sendMessage(); }}
-              placeholder="Type your message..."
-              style={{
-                flexGrow: 1, padding: '8px', borderRadius: '5px', border: '1px solid #444',
-                backgroundColor: '#0d1117', color: '#c9d1d9',
-              }}
-            />
-            <button
-              onClick={sendMessage}
-              style={{
-                padding: '8px 15px', backgroundColor: '#0366d6', color: 'white', border: 'none',
-                borderRadius: '5px', cursor: 'pointer', transition: 'background-color 0.2s ease'
-              }}
-              onMouseEnter={(e) => e.target.style.backgroundColor = '#005cc5'}
-              onMouseLeave={(e) => e.target.style.backgroundColor = '#0366d6'}
-            >
-              Send
-            </button>
-          </div>
+        {/* Output Section */}
+        <div style={{ display: 'flex', flexDirection: 'column', padding: '10px', flexGrow: 1, minHeight: '50px', overflow: 'hidden' }}>
+          <h3 style={{ margin: '0 0 10px 0', color: '#c9d1d9', flexShrink: 0 }}>Output (stdout/stderr)</h3>
+          <pre style={{ flexGrow: 1, padding: '8px', borderRadius: '5px', border: '1px solid #444', backgroundColor: '#0d1117', color: '#c9d1d9', overflow: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
+            {output}
+          </pre>
         </div>
       </div>
 
+
+      {/* --- Modals Section --- */}
+
       {/* Custom Confirmation Dialog */}
       {showConfirmDialog && (
-        <ConfirmationDialog
+        <ModalDialog
+          title={confirmTitle}
           message={confirmMessage}
           onConfirm={confirmAction}
-          onCancel={() => setShowConfirmDialog(false)}
+          onCancel={confirmCancel}
+          confirmText={confirmText}
+        />
+      )}
+
+      {/* File Explorer Modal */}
+      {showFilesModal && (
+        <ModalDialog
+          title="Project Explorer"
+          message={renderFileExplorerContent()}
+          onConfirm={() => setShowFilesModal(false)}
+          confirmText="Close"
+        />
+      )}
+
+      {/* Chat Modal */}
+      {showChatModal && (
+        <ModalDialog
+          title="Room Chat"
+          message={renderChatContent()}
+          onConfirm={() => setShowChatModal(false)}
+          confirmText="Close"
+        />
+      )}
+
+      {/* Participants Modal */}
+      {showParticipantsModal && (
+        <ModalDialog
+          title="Participants"
+          message={renderParticipantsContent()}
+          onConfirm={() => setShowParticipantsModal(false)}
+          confirmText="Close"
+        />
+      )}
+
+      {/* --- 6. ADD THE NEW VISUALIZER MODAL --- */}
+      {showVisualizerModal && (
+        <ModalDialog
+          title="Code Visualizer"
+          message={
+            <CodeVisualizerModal 
+              trace={visualizerTrace} 
+              code={code}
+              language={language}
+              onClose={() => setShowVisualizerModal(false)} 
+            />
+          }
+          onConfirm={() => {
+            setShowVisualizerModal(false);
+            setVisualizerTrace(null); // Clear the trace data
+          }}
+          confirmText="Close"
         />
       )}
     </div>

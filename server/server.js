@@ -1,10 +1,16 @@
+// server/server.js
+
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
+const axios = require('axios'); 
+const qs = require("qs");
 
 const app = express();
 app.use(cors());
+app.use(express.json()); // <-- 2. REQUIRED: This is crucial for parsing JSON request bodies
+
 const server = http.createServer(app);
 
 const io = new Server(server, {
@@ -14,21 +20,95 @@ const io = new Server(server, {
   }
 });
 
-const roomMessages = {};
-const roomUsers = {}; // Stores { roomName: { socketId: { displayName, userId, socketId, isAvailableForCall } } }
-const callsInProgress = {}; // To track active calls: {callerId: calleeId, calleeId: callerId}
+// --- Visualizer Language Map ---
+const VISUALIZER_LANG_MAP = {
+  'cpp': 'cpp',
+  'c': 'c',
+  'java': 'java',
+  'javascript': 'js',
+  'python': 'py3', // Assuming Python 3
+};
 
-// Helper function to get a list of user objects for a given room
+
+app.post("/visualize", async (req, res) => {
+  console.log("📩 /visualize called with:", req.body); // <--- LOG
+
+  const { language, code } = req.body;
+
+  const VISUALIZER_LANG_MAP = {
+    cpp: "cpp",
+    c: "c",
+    java: "java",
+    javascript: "js",
+    python: "py3",
+  };
+
+  const visualizerLang = VISUALIZER_LANG_MAP[(language || "").toLowerCase()];
+
+  if (!visualizerLang) {
+    return res.status(400).json({ error: "Language not supported." });
+  }
+
+  try {
+    const payload = qs.stringify({
+      user_script: code,
+      raw_input_json: JSON.stringify(null),
+      options_json: JSON.stringify({
+        cumulative_mode: false,
+        heap_primitives: false,
+        show_only_user_code: true,
+      }),
+      lang: visualizerLang,
+    });
+
+    console.log("🌐 Sending to PythonTutor...", payload.length, "bytes");
+
+    const response = await axios.post(
+      "https://pythontutor.com/web_exec",
+      payload,
+      {
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          "Accept": "*/*",
+          "Origin": "https://pythontutor.com",
+          "Referer": "https://pythontutor.com/",
+        },
+        timeout: 20000, // prevent "socket hang up"
+      }
+    );
+
+    console.log("✅ PythonTutor response OK");
+    return res.json(response.data);
+  } catch (error) {
+    console.error("❌ PYTHONTUTOR ERROR:");
+    console.error("Status:", error?.response?.status);
+    console.error("Data:", error?.response?.data);
+    console.error("Message:", error.message);
+
+    return res.status(500).json({
+      error: "Visualizer request failed",
+      details: error?.response?.data || error.message,
+    });
+  }
+});
+
+
+console.log('✅ /visualize endpoint registered.'); 
+
+// --- ALL YOUR EXISTING SOCKET.IO CODE REMAINS UNCHANGED ---
+const roomMessages = {};
+const roomUsers = {}; 
+const callsInProgress = {}; 
+
 function getRoomUserList(room) {
-  // Return an array of user objects, not just display names
   return Object.values(roomUsers[room] || {});
 }
 
-// Helper function to manage user call availability and broadcast updates
 function setUserAvailability(room, socketId, isAvailable) {
     if (roomUsers[room] && roomUsers[room][socketId]) {
         roomUsers[room][socketId].isAvailableForCall = isAvailable;
-        // Emit the full updated list to the room
         io.to(room).emit('room-users-update', getRoomUserList(room));
     }
 }
@@ -37,16 +117,16 @@ io.on('connection', (socket) => {
   console.log(`User connected: ${socket.id}`);
 
   let currentRoom = null;
-  let currentUserDetails = null; // Store user details here
+  let currentUserDetails = null; 
 
   socket.on('join-room', ({ room, userDetails }) => {
     socket.join(room);
     currentRoom = room;
-    currentUserDetails = { // Store complete user details, including socketId and initial availability
+    currentUserDetails = {
         userId: userDetails.userId,
         displayName: userDetails.displayName,
-        socketId: socket.id, // Add socketId to user details for easier lookup
-        isAvailableForCall: true // Default to available when joining
+        socketId: socket.id, 
+        isAvailableForCall: true 
     };
 
     console.log(`User ${currentUserDetails.displayName} (${socket.id}) joined room: ${room}`);
@@ -54,7 +134,7 @@ io.on('connection', (socket) => {
     if (!roomUsers[room]) {
       roomUsers[room] = {};
     }
-    roomUsers[room][socket.id] = currentUserDetails; // Store by socket.id
+    roomUsers[room][socket.id] = currentUserDetails;
 
     if (roomMessages[room]) {
       roomMessages[room].forEach(msg => socket.emit('receive-message', msg));
@@ -77,12 +157,9 @@ io.on('connection', (socket) => {
   });
 
   // --- WebRTC Signaling Events ---
-
-  // The 'offer' parameter is now expected from the client's startCall
   socket.on('call-request', ({ room, callerId, callerDisplayName, offer }) => {
     console.log(`Call request in room ${room} from ${callerDisplayName} (${socket.id})`);
 
-    // Find a target (the first available user in the room, excluding the caller)
     const availablePeers = Object.entries(roomUsers[room] || {})
         .filter(([sockId, user]) => sockId !== socket.id && user.isAvailableForCall);
 
@@ -177,5 +254,7 @@ io.on('connection', (socket) => {
 });
 
 
-const PORT = process.env.PORT || 3001;
-server.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
+});

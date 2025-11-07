@@ -1,3 +1,5 @@
+/* client/src/index.css */
+
 body {
   margin: 0;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
@@ -10,4 +12,18 @@ body {
 code {
   font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New',
     monospace;
+}
+
+/* --- ADD THESE STYLES --- */
+
+/* Style for the line that has just executed */
+.visualizer-executed-line {
+  background-color: rgba(0, 122, 204, 0.3) !important; /* Blue highlight */
+  border-left: 3px solid #007acc;
+}
+
+/* Style for the next line to be executed */
+.visualizer-next-line {
+  background-color: rgba(230, 170, 0, 0.3) !important; /* Yellow highlight */
+  border-left: 3px solid #e6aa00;
 }
